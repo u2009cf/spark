@@ -139,12 +139,10 @@ class NewHadoopRDD[K, V](
       private val inputMetrics = context.taskMetrics().inputMetrics
       private val existingBytesRead = inputMetrics.bytesRead
 
-      // Sets InputFileBlockHolder for the file block's information
+      // Sets the thread local variable for the file's name
       split.serializableHadoopSplit.value match {
-        case fs: FileSplit =>
-          InputFileBlockHolder.set(fs.getPath.toString, fs.getStart, fs.getLength)
-        case _ =>
-          InputFileBlockHolder.unset()
+        case fs: FileSplit => InputFileNameHolder.setInputFileName(fs.getPath.toString)
+        case _ => InputFileNameHolder.unsetInputFileName()
       }
 
       // Find a function that will return the FileSystem bytes read by this thread. Do this before
@@ -152,11 +150,11 @@ class NewHadoopRDD[K, V](
       private val getBytesReadCallback: Option[() => Long] =
         split.serializableHadoopSplit.value match {
           case _: FileSplit | _: CombineFileSplit =>
-            Some(SparkHadoopUtil.get.getFSBytesReadOnThreadCallback())
+            SparkHadoopUtil.get.getFSBytesReadOnThreadCallback()
           case _ => None
         }
 
-      // We get our input bytes from thread-local Hadoop FileSystem statistics.
+      // For Hadoop 2.5+, we get our input bytes from thread-local Hadoop FileSystem statistics.
       // If we do a coalesce, however, we are likely to compute multiple partitions in the same
       // task and in the same thread, in which case we need to avoid override values written by
       // previous partitions (SPARK-13071).
@@ -191,13 +189,7 @@ class NewHadoopRDD[K, V](
         }
 
       // Register an on-task-completion callback to close the input stream.
-      context.addTaskCompletionListener { context =>
-        // Update the bytesRead before closing is to make sure lingering bytesRead statistics in
-        // this thread get correctly added.
-        updateBytesRead()
-        close()
-      }
-
+      context.addTaskCompletionListener(context => close())
       private var havePair = false
       private var recordsSinceMetricsUpdate = 0
 
@@ -237,9 +229,13 @@ class NewHadoopRDD[K, V](
         (reader.getCurrentKey, reader.getCurrentValue)
       }
 
-      private def close(): Unit = {
+      private def close() {
         if (reader != null) {
-          InputFileBlockHolder.unset()
+          InputFileNameHolder.unsetInputFileName()
+          // Close the reader and release it. Note: it's very important that we don't close the
+          // reader more than once, since that exposes us to MAPREDUCE-5918 when running against
+          // Hadoop 1.x and older Hadoop 2.x releases. That bug can lead to non-deterministic
+          // corruption issues when reading compressed input.
           try {
             reader.close()
           } catch {
@@ -279,8 +275,30 @@ class NewHadoopRDD[K, V](
 
   override def getPreferredLocations(hsplit: Partition): Seq[String] = {
     val split = hsplit.asInstanceOf[NewHadoopPartition].serializableHadoopSplit.value
-    val locs = HadoopRDD.convertSplitLocationInfo(split.getLocationInfo)
+    val locs = HadoopRDD.SPLIT_INFO_REFLECTIONS match {
+      case Some(c) =>
+        try {
+          val infos = c.newGetLocationInfo.invoke(split).asInstanceOf[Array[AnyRef]]
+          HadoopRDD.convertSplitLocationInfo(infos)
+        } catch {
+          case e : Exception =>
+            logDebug("Failed to use InputSplit#getLocationInfo.", e)
+            None
+        }
+      case None => None
+    }
     locs.getOrElse(split.getLocations.filter(_ != "localhost"))
+  }
+
+  /**
+   * Used to get partition size
+   * We will use this value as a metric of evaluating tasks' load
+   * Added by chenfei
+   */
+  override def getPartitionSize(hSplit: Partition): Long = {
+    val split = hSplit.asInstanceOf[NewHadoopPartition].serializableHadoopSplit.value
+    val length = split.getLength()
+    length
   }
 
   override def persist(storageLevel: StorageLevel): this.type = {
