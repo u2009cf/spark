@@ -32,10 +32,6 @@ private[spark] object BlockManagerMessages {
   // blocks that the master knows about.
   case class RemoveBlock(blockId: BlockId) extends ToBlockManagerSlave
 
-  // Replicate blocks that were lost due to executor failure
-  case class ReplicateBlock(blockId: BlockId, replicas: Seq[BlockManagerId], maxReplicas: Int)
-    extends ToBlockManagerSlave
-
   // Remove all blocks belonging to a specific RDD.
   case class RemoveRdd(rddId: Int) extends ToBlockManagerSlave
 
@@ -58,8 +54,7 @@ private[spark] object BlockManagerMessages {
 
   case class RegisterBlockManager(
       blockManagerId: BlockManagerId,
-      maxOnHeapMemSize: Long,
-      maxOffHeapMemSize: Long,
+      maxMemSize: Long,
       sender: RpcEndpointRef)
     extends ToBlockManagerMaster
 
@@ -94,6 +89,10 @@ private[spark] object BlockManagerMessages {
   case class GetLocations(blockId: BlockId) extends ToBlockManagerMaster
 
   case class GetLocationsMultipleBlockIds(blockIds: Array[BlockId]) extends ToBlockManagerMaster
+
+  // This message is send to BlockManagerMaster to get blocks' size
+  // Added by chenfei
+  case class GetSizesMultipleBlockIds(blockIds: Array[BlockId]) extends ToBlockManagerMaster
 
   case class GetPeers(blockManagerId: BlockManagerId) extends ToBlockManagerMaster
 
