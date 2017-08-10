@@ -41,7 +41,7 @@ import org.apache.spark.partial.GroupedCountEvaluator
 import org.apache.spark.partial.PartialResult
 import org.apache.spark.storage.{RDDBlockId, StorageLevel}
 import org.apache.spark.util.{BoundedPriorityQueue, Utils}
-import org.apache.spark.util.collection.{OpenHashMap, Utils => collectionUtils}
+import org.apache.spark.util.collection.OpenHashMap
 import org.apache.spark.util.random.{BernoulliCellSampler, BernoulliSampler, PoissonSampler,
   SamplingUtils}
 
@@ -55,7 +55,7 @@ import org.apache.spark.util.random.{BernoulliCellSampler, BernoulliSampler, Poi
  * Doubles; and
  * [[org.apache.spark.rdd.SequenceFileRDDFunctions]] contains operations available on RDDs that
  * can be saved as SequenceFiles.
- * All operations are automatically available on any RDD of the right type (e.g. RDD[(Int, Int)])
+ * All operations are automatically available on any RDD of the right type (e.g. RDD[(Int, Int)]
  * through implicit.
  *
  * Internally, each RDD is characterized by five main properties:
@@ -134,6 +134,12 @@ abstract class RDD[T: ClassTag](
    * Optionally overridden by subclasses to specify placement preferences.
    */
   protected def getPreferredLocations(split: Partition): Seq[String] = Nil
+
+  /**
+   * Optionally overridden by subclasses to specify partition size.
+   * Added by chenfei
+   */
+  protected def getPartitionSize(split: Partition): Long = -1L
 
   /** Optionally overridden by subclasses to specify how they are partitioned. */
   @transient val partitioner: Option[Partitioner] = None
@@ -272,6 +278,17 @@ abstract class RDD[T: ClassTag](
   final def preferredLocations(split: Partition): Seq[String] = {
     checkpointRDD.map(_.getPreferredLocations(split)).getOrElse {
       getPreferredLocations(split)
+    }
+  }
+
+  /**
+   * Get the partition size of a partition, we will view
+   * this value as the load of a task.
+   * Added by chenfei
+   */
+  final def partitionSize(split: Partition): Long = {
+    checkpointRDD.map(_.getPartitionSize(split)).getOrElse {
+      getPartitionSize(split)
     }
   }
 
@@ -1118,9 +1135,9 @@ abstract class RDD[T: ClassTag](
 
   /**
    * Aggregates the elements of this RDD in a multi-level tree pattern.
-   * This method is semantically identical to [[org.apache.spark.rdd.RDD#aggregate]].
    *
    * @param depth suggested depth of the tree (default: 2)
+   * @see [[org.apache.spark.rdd.RDD#aggregate]]
    */
   def treeAggregate[U: ClassTag](zeroValue: U)(
       seqOp: (U, T) => U,
@@ -1134,7 +1151,7 @@ abstract class RDD[T: ClassTag](
       val cleanCombOp = context.clean(combOp)
       val aggregatePartition =
         (it: Iterator[T]) => it.aggregate(zeroValue)(cleanSeqOp, cleanCombOp)
-      var partiallyAggregated: RDD[U] = mapPartitions(it => Iterator(aggregatePartition(it)))
+      var partiallyAggregated = mapPartitions(it => Iterator(aggregatePartition(it)))
       var numPartitions = partiallyAggregated.partitions.length
       val scale = math.max(math.ceil(math.pow(numPartitions, 1.0 / depth)).toInt, 2)
       // If creating an extra level doesn't help reduce
@@ -1146,10 +1163,9 @@ abstract class RDD[T: ClassTag](
         val curNumPartitions = numPartitions
         partiallyAggregated = partiallyAggregated.mapPartitionsWithIndex {
           (i, iter) => iter.map((i % curNumPartitions, _))
-        }.foldByKey(zeroValue, new HashPartitioner(curNumPartitions))(cleanCombOp).values
+        }.reduceByKey(new HashPartitioner(curNumPartitions), cleanCombOp).values
       }
-      val copiedZeroValue = Utils.clone(zeroValue, sc.env.closureSerializer.newInstance())
-      partiallyAggregated.fold(copiedZeroValue)(cleanCombOp)
+      partiallyAggregated.reduce(cleanCombOp)
     }
   }
 
@@ -1421,7 +1437,7 @@ abstract class RDD[T: ClassTag](
       val mapRDDs = mapPartitions { items =>
         // Priority keeps the largest elements, so let's reverse the ordering.
         val queue = new BoundedPriorityQueue[T](num)(ord.reverse)
-        queue ++= collectionUtils.takeOrdered(items, num)(ord)
+        queue ++= util.collection.Utils.takeOrdered(items, num)(ord)
         Iterator.single(queue)
       }
       if (mapRDDs.partitions.length == 0) {
@@ -1844,7 +1860,7 @@ abstract class RDD[T: ClassTag](
  * Defines implicit functions that provide extra functionalities on RDDs of specific types.
  *
  * For example, [[RDD.rddToPairRDDFunctions]] converts an RDD into a [[PairRDDFunctions]] for
- * key-value-pair RDDs, and enabling extra functionalities such as `PairRDDFunctions.reduceByKey`.
+ * key-value-pair RDDs, and enabling extra functionalities such as [[PairRDDFunctions.reduceByKey]].
  */
 object RDD {
 
