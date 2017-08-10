@@ -17,6 +17,8 @@
 
 package org.apache.spark.scheduler
 
+import scala.collection.mutable.ListBuffer
+
 import org.apache.spark.TaskState
 import org.apache.spark.TaskState.TaskState
 import org.apache.spark.annotation.DeveloperApi
@@ -52,12 +54,22 @@ class TaskInfo(
    * accumulable to be updated multiple times in a single task or for two accumulables with the
    * same name but different IDs to exist in a task.
    */
-  def accumulables: Seq[AccumulableInfo] = _accumulables
+  val accumulables = ListBuffer[AccumulableInfo]()
 
-  private[this] var _accumulables: Seq[AccumulableInfo] = Nil
+  /**
+   * We record the original task size when task is created and update task size in progress.
+   * We can estimate the progress ratio to avoid redundant speculation.
+   * Added by chenfei
+   */
+  var taskSizeOriginal = -1L
 
-  private[spark] def setAccumulables(newAccumulables: Seq[AccumulableInfo]): Unit = {
-    _accumulables = newAccumulables
+  var taskSizeInProgress = 0L
+
+  var throughput = 0.0
+
+  private[spark] def getProgressRatio(): Double = {
+    if (taskSizeOriginal < 0) return 1.0
+    1.0 * taskSizeInProgress / taskSizeOriginal
   }
 
   /**
@@ -70,15 +82,15 @@ class TaskInfo(
 
   var killed = false
 
-  private[spark] def markGettingResult(time: Long) {
+  private[spark] def markGettingResult(time: Long = System.currentTimeMillis) {
     gettingResultTime = time
   }
 
-  private[spark] def markFinished(state: TaskState, time: Long) {
-    // finishTime should be set larger than 0, otherwise "finished" below will return false.
-    assert(time > 0)
+  private[spark] def markFinished(state: TaskState, time: Long = System.currentTimeMillis) {
     finishTime = time
-    if (state == TaskState.FAILED) {
+    if (state == TaskState.FINISHED) {
+      throughput = 1000.0 * taskSizeOriginal / duration
+    } else if (state == TaskState.FAILED) {
       failed = true
     } else if (state == TaskState.KILLED) {
       killed = true
